@@ -6,12 +6,12 @@
 <title>日切放行</title>
 <script src="/static/vue.global.prod.js"></script>
 <style>
-  :root{--bg:#0b1220;--panel:#121a2b;--line:#243049;--text:#e8eefc;--muted:#93a0b8;--ok:#3ddc97;--bad:#ff6b6b;--accent:#4cc9f0}
+  :root{--bg:#0b1220;--panel:#121a2b;--line:#243049;--text:#e8eefc;--muted:#93a0b8;--ok:#3ddc97;--bad:#ff6b6b;--warn:#f5b942;--accent:#4cc9f0}
   *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
   .top{display:flex;align-items:center;gap:18px;padding:14px 20px;border-bottom:1px solid var(--line);background:#0e1626}
   .brand{font-weight:700;letter-spacing:.08em;font-size:18px}
   .brand small{display:block;color:var(--muted);font-weight:400;font-size:11px;letter-spacing:.02em;margin-top:2px}
-  .tabs{display:flex;gap:6px;flex:1}
+  .tabs{display:flex;gap:6px;flex:1;flex-wrap:wrap}
   .tabs button{background:transparent;border:1px solid transparent;color:var(--muted);padding:8px 12px;border-radius:999px;cursor:pointer}
   .tabs button.on{color:var(--text);border-color:var(--line);background:#18233a}
   .user{color:var(--muted);font-size:13px}
@@ -21,7 +21,7 @@
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
   h2{margin:0 0 10px;font-size:15px;color:#c9d4ea}
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+  th,td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
   th{color:var(--muted);font-weight:600}
   input,select{width:100%;background:#0b1220;border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px 10px;margin:4px 0 10px}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -29,10 +29,16 @@
   .mono{font-family:Consolas,"Courier New",monospace}
   .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#1b2a22;color:var(--ok)}
   .tag.bad{background:#2a1518;color:var(--bad)}
+  .tag.warn{background:#2a2414;color:var(--warn)}
   .login{max-width:400px;margin:12vh auto;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}
   .err{color:var(--bad);min-height:18px;font-size:13px}
-  .kpi{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+  .kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
   .kpi .panel{padding:12px}.kpi b{display:block;font-size:22px;margin-top:4px}
+  .policy{background:#101c2e;border:1px solid var(--accent);border-radius:10px;padding:10px 12px;font-size:12.5px;line-height:1.6;margin-bottom:14px}
+  .policy b{color:var(--accent)}
+  .policy.bad{border-color:var(--bad)}
+  .muted{color:var(--muted);font-size:12px}
+  .block{margin-bottom:14px}
 </style>
 </head>
 <body>
@@ -55,12 +61,19 @@ createApp({
     const token=ref(localStorage.getItem('slicegate_token')||'');
     const user=ref(localStorage.getItem('slicegate_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
-    const slices=ref([]), releases=ref([]), watermarks=ref([]);
+    const slices=ref([]), releases=ref([]), watermarks=ref([]), wmDetail=ref({consumers:[],calendar_today:''});
+    const policy=ref({}), doctrine=ref({}), catalog=ref({groups:[],policy:{},watermarks:{consumers:[]}});
+    const checks=ref([]), dispositions=ref([]), dispositionsPage=ref({items:[],actions:[]}), audit=ref({ok:true,problems:[],counts:{}});
     const form=ref({slice_no:'SL-2026-11-03-east',biz_date:'2026-11-03',partition_key:'east',row_count:1000,expected_count:1000});
     const releaseSliceId=ref(1), consumer=ref('ads_order');
-    const nav=['切片登记','完整度裁决','下游放行','消费水位'];
+    const baselineForm=ref({consumer:'ads_order',biz_date:'2026-11-02',watermark:'2026-11-02T09:00:00',note:'补齐跨日缺口'});
+    const dispositionForm=ref({check_id:0,action:'复核',note:''});
+    const precheck=ref(null), precheckConsumer=ref('ads_order'), precheckDate=ref('2026-11-03');
+    const nav=['切片登记','完整度裁决','下游放行','消费水位','衔接目录','处置页'];
     const completeCnt=computed(()=>slices.value.filter(s=>s.completeness==='完整').length);
     const openCnt=computed(()=>slices.value.filter(s=>s.release_status!=='已放行').length);
+    const policyOk=computed(()=>policy.value.ok===true);
+    const gapConsumers=computed(()=>wmDetail.value.consumers.filter(c=>!c.continuity));
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -77,6 +90,13 @@ createApp({
       if(r.status===401){ logout(); return null; }
       return j;
     }
+    function failText(j){
+      if(!j) return '请求失败';
+      const d=j.detail;
+      if(typeof d==='string') return d;
+      if(d&&d.message) return d.code ? ('['+d.code+'] '+d.message) : d.message;
+      return '请求失败';
+    }
     async function refresh(){
       if(!token.value) return;
       const s=await loadJson('/api/slices'); if(s===null) return;
@@ -85,13 +105,55 @@ createApp({
       releases.value=Array.isArray(rel.items)?rel.items:[];
       const w=await loadJson('/api/watermarks'); if(w===null) return;
       watermarks.value=Array.isArray(w.items)?w.items:[];
+      if(w.detail) wmDetail.value=w.detail;
+      if(w.doctrine) doctrine.value=w.doctrine;
+      const p=await loadJson('/api/handoff/policy'); if(p===null) return;
+      policy.value=p.policy||{};
+      const c=await loadJson('/api/handoff/catalog'); if(c===null) return;
+      catalog.value=c;
+      const h=await loadJson('/api/handoff/checks'); if(h===null) return;
+      checks.value=Array.isArray(h.items)?h.items:[];
+      const d=await loadJson('/api/handoff/dispositions'); if(d===null) return;
+      dispositionsPage.value=d; dispositions.value=Array.isArray(d.items)?d.items:[];
+      const a=await loadJson('/api/handoff/audit'); if(a===null) return;
+      audit.value=a;
       if(slices.value.length) releaseSliceId.value=slices.value[0].id;
     }
-    async function createSlice(){actionErr.value='';const r=await fetch('/api/slices',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'失败';await refresh();}
-    async function evaluate(id){await fetch('/api/slices/'+id+'/evaluate',{method:'POST',headers:auth()});await refresh();}
-    async function doRelease(){actionErr.value='';const r=await fetch('/api/slices/'+releaseSliceId.value+'/release',{method:'POST',headers:auth(),body:JSON.stringify({consumer:consumer.value})});const j=await r.json();if(!r.ok)actionErr.value=j.detail||'放行失败';await refresh();}
+    async function createSlice(){actionErr.value='';const r=await fetch('/api/slices',{method:'POST',headers:auth(),body:JSON.stringify(form.value)});const j=await r.json();if(!r.ok)actionErr.value=failText(j);await refresh();}
+    async function evaluate(id){actionErr.value='';const r=await fetch('/api/slices/'+id+'/evaluate',{method:'POST',headers:auth()});if(!r.ok)actionErr.value=failText(await r.json());await refresh();}
+    async function doRelease(){
+      actionErr.value='';
+      const r=await fetch('/api/slices/'+releaseSliceId.value+'/release',{method:'POST',headers:auth(),body:JSON.stringify({consumer:consumer.value})});
+      const j=await r.json();
+      if(!r.ok) actionErr.value=failText(j); else actionErr.value='放行成功：水位 '+j.watermark+'（承接昨日 '+j.prev_watermark+'）';
+      await refresh();
+    }
+    async function runPrecheck(){
+      precheck.value=null;
+      const q='?consumer='+encodeURIComponent(precheckConsumer.value)+'&biz_date='+encodeURIComponent(precheckDate.value);
+      precheck.value=await loadJson('/api/handoff/evaluate'+q);
+    }
+    async function doBaseline(){
+      actionErr.value='';
+      const r=await fetch('/api/handoff/baseline',{method:'POST',headers:auth(),body:JSON.stringify(baselineForm.value)});
+      const j=await r.json();
+      actionErr.value=r.ok?('基线补登已入账：'+j.check_no):failText(j);
+      await refresh();
+    }
+    async function doDisposition(){
+      actionErr.value='';
+      if(!dispositionForm.value.check_id){actionErr.value='先选一条衔接检查';return;}
+      const r=await fetch('/api/handoff/checks/'+dispositionForm.value.check_id+'/disposition',{method:'POST',headers:auth(),body:JSON.stringify({action:dispositionForm.value.action,note:dispositionForm.value.note})});
+      const j=await r.json();
+      actionErr.value=r.ok?'处置已记录':failText(j);
+      await refresh();
+    }
+    function pickDisposition(id){dispositionForm.value.check_id=id;}
+    function tagClass(v){return v==='通过'?'':(v==='缺口'||v==='衔接口径偏了'||v==='水位回拨')?'bad':'warn';}
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,form,releaseSliceId,consumer,actionErr,completeCnt,openCnt,login,logout,createSlice,evaluate,doRelease};
+    return {token,user,username,password,err,tab,nav,slices,releases,watermarks,wmDetail,policy,doctrine,catalog,checks,dispositions,dispositionsPage,audit,
+      form,releaseSliceId,consumer,baselineForm,dispositionForm,precheck,precheckConsumer,precheckDate,actionErr,
+      completeCnt,openCnt,policyOk,gapConsumers,login,logout,createSlice,evaluate,doRelease,runPrecheck,doBaseline,doDisposition,pickDisposition,tagClass};
   },
   template:`
   <div v-if="!token" class="login">
@@ -101,24 +163,37 @@ createApp({
   </div>
   <div v-if="token">
     <div class="top">
-      <div class="brand">日切放行<small>切片 → 完整度 → 放行 → 水位</small></div>
+      <div class="brand">日切放行<small>切片 → 完整度 → 衔接 → 放行 → 水位</small></div>
       <div class="tabs"><button v-for="(n,i) in nav" :key="n" :class="{on:tab===i}" @click="tab=i">{{n}}</button></div>
       <div class="user">{{user}}</div><button class="ghost" @click="logout">退出</button>
     </div>
     <main>
+      <div class="policy" :class="{bad:!policyOk}">
+        <b>衔接策略条 · {{policy.code||'未绑定'}}</b> {{policy.label}} · 钉死日 {{policy.pinned_on}}
+        <span class="tag" :class="{bad:!policyOk}">{{policyOk?'口径已钉死':'口径异常，放行闸关闭'}}</span>
+        <div class="muted">口径哈希 <span class="mono">{{doctrine.sha}}</span> · 库内 <span class="mono">{{policy.sha}}</span></div>
+        <div>{{policy.rule}}</div>
+        <div class="muted">乙规则（未启用）：{{policy.rejected_rule}}</div>
+      </div>
+
       <div class="kpi">
         <div class="panel">切片总数<b class="mono">{{slices.length}}</b></div>
         <div class="panel">已完整<b class="mono">{{completeCnt}}</b></div>
         <div class="panel">未放行<b class="mono">{{openCnt}}</b></div>
+        <div class="panel">水位缺口消费方<b class="mono" :style="{color:gapConsumers.length?'var(--bad)':'var(--ok)'}">{{gapConsumers.length}}</b></div>
       </div>
+
       <div v-show="tab===0" class="grid">
         <div class="panel">
-          <h2>在途切片</h2>
-          <table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th></th></tr></thead>
+          <h2>在途切片 · 衔接可核</h2>
+          <table><thead><tr><th>切片号</th><th>日/区</th><th>实收</th><th>完整度</th><th>衔接</th><th>水位</th><th></th></tr></thead>
           <tbody><tr v-for="s in slices" :key="s.id">
             <td class="mono">{{s.slice_no}}</td><td>{{s.biz_date}} / {{s.partition_key}}</td>
             <td class="mono">{{s.row_count}}/{{s.expected_count}}</td>
             <td><span class="tag" :class="{bad:s.completeness!=='完整'}">{{s.completeness}}</span></td>
+            <td><span class="tag" :class="tagClass(s.handoff_verdict)">{{s.handoff_verdict}}</span>
+              <div class="muted mono">{{s.handoff_check_no}}</div></td>
+            <td class="mono">{{s.watermark_written? s.watermark_event+' '+s.watermark_value : '无'}}</td>
             <td><button class="ghost" @click="evaluate(s.id)">重裁</button></td>
           </tr></tbody></table>
         </div>
@@ -131,32 +206,125 @@ createApp({
           <div class="err">{{actionErr}}</div>
         </div>
       </div>
+
       <div v-show="tab===1" class="panel">
         <h2>完整度裁决</h2>
-        <table><thead><tr><th>切片</th><th>缺口</th><th>结论</th><th>放行态</th></tr></thead>
+        <table><thead><tr><th>切片</th><th>缺口</th><th>结论</th><th>放行态</th><th>衔接判定</th></tr></thead>
         <tbody><tr v-for="s in slices" :key="'c'+s.id">
           <td class="mono">{{s.slice_no}}</td><td class="mono">{{Math.max(s.expected_count-s.row_count,0)}}</td>
           <td>{{s.completeness}}</td><td>{{s.release_status}}</td>
+          <td><span class="tag" :class="tagClass(s.handoff_verdict)">{{s.handoff_verdict}}</span></td>
         </tr></tbody></table>
       </div>
+
       <div v-show="tab===2" class="grid">
         <div class="panel">
-          <h2>申请放行</h2>
+          <h2>申请放行（甲口径硬闸）</h2>
           <label>切片</label><select v-model.number="releaseSliceId"><option v-for="s in slices" :value="s.id">{{s.slice_no}}（{{s.completeness}}）</option></select>
           <label>下游</label><input v-model="consumer"/>
           <button class="primary" @click="doRelease">放行</button>
           <div class="err">{{actionErr}}</div>
+          <h2 style="margin-top:16px">放行前核昨日水位</h2>
+          <div class="row"><div><label>下游</label><input v-model="precheckConsumer"/></div><div><label>业务日</label><input v-model="precheckDate"/></div></div>
+          <button class="ghost" @click="runPrecheck">只读核验</button>
+          <div v-if="precheck" style="margin-top:10px">
+            <div><span class="tag" :class="tagClass(precheck.verdict)">{{precheck.verdict}}</span> {{precheck.detail}}</div>
+            <div class="muted">昨日 {{precheck.prev_biz_date}} 现行水位 <span class="mono">{{precheck.prev_watermark||'不可核'}}</span></div>
+            <div class="muted" v-if="precheck.missing_dates&&precheck.missing_dates.length">缺口：<span class="mono">{{precheck.missing_dates.join('、')}}</span></div>
+          </div>
         </div>
         <div class="panel">
           <h2>放行流水</h2>
-          <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>时间</th></tr></thead>
-          <tbody><tr v-for="r in releases" :key="r.id"><td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td><td>{{r.status}}</td><td class="mono">{{r.created_at}}</td></tr></tbody></table>
+          <table><thead><tr><th>切片</th><th>下游</th><th>结果</th><th>衔接</th><th>时间</th></tr></thead>
+          <tbody><tr v-for="r in releases" :key="r.id"><td class="mono">{{r.slice_no}}</td><td>{{r.consumer}}</td>
+            <td><span class="tag" :class="{bad:r.status!=='成功'}">{{r.status}}</span></td>
+            <td class="mono muted">{{r.check_id?('#'+r.check_id):'—'}}</td>
+            <td class="mono">{{r.created_at}}</td></tr></tbody></table>
         </div>
       </div>
-      <div v-show="tab===3" class="panel">
-        <h2>消费水位</h2>
-        <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>来源切片</th></tr></thead>
-        <tbody><tr v-for="w in watermarks" :key="w.id"><td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td><td class="mono">{{w.source_slice}}</td></tr></tbody></table>
+
+      <div v-show="tab===3">
+        <div class="panel block">
+          <h2>水位详情 · 昨日现行水位可核性</h2>
+          <div class="muted">日历今日 <span class="mono">{{wmDetail.calendar_today}}</span>；以下“昨日”以各消费方现行水位所在业务日为锚。</div>
+          <table style="margin-top:8px"><thead><tr><th>消费方</th><th>现行水位</th><th>昨日业务日</th><th>昨日现行水位</th><th>可核</th><th>连续性</th><th>告警</th></tr></thead>
+          <tbody><tr v-for="c in wmDetail.consumers" :key="c.consumer">
+            <td>{{c.consumer}}<div class="muted">链首 <span class="mono">{{c.chain_start}}</span></div></td>
+            <td class="mono">{{c.current_biz_date}}<br/>{{c.current_watermark}}</td>
+            <td class="mono">{{c.yesterday_biz_date}}</td>
+            <td class="mono">{{c.yesterday_watermark||'不可核'}}</td>
+            <td><span class="tag" :class="{bad:!c.yesterday_ok}">{{c.yesterday_ok?'可核':(c.first_day?'链首无前日':'不可核')}}</span></td>
+            <td><span class="tag" :class="{bad:!c.continuity}">{{c.continuity?'连续':'断档'}}</span></td>
+            <td class="muted" style="color:var(--warn)">{{c.gap_warning||'—'}}</td>
+          </tr></tbody></table>
+        </div>
+        <div class="panel block">
+          <h2>水位账本（只追加，含缺口告警）</h2>
+          <table><thead><tr><th>消费方</th><th>业务日</th><th>水位</th><th>承接</th><th>事件</th><th>来源切片</th><th>衔接</th><th>操作人</th></tr></thead>
+          <tbody><tr v-for="w in watermarks" :key="w.id">
+            <td>{{w.consumer}}</td><td>{{w.biz_date}}</td><td class="mono">{{w.watermark}}</td>
+            <td class="mono muted">{{w.prev_watermark||'—'}}</td>
+            <td><span class="tag" :class="{warn:w.event!=='推进'}">{{w.event}}</span></td>
+            <td class="mono">{{w.source_slice}}</td><td class="mono muted">{{w.ref_check_id?('#'+w.ref_check_id):'—'}}</td>
+            <td class="muted">{{w.operator}}</td></tr></tbody></table>
+        </div>
+        <div class="panel">
+          <h2>基线补登（补齐历史缺口，只追加不覆盖）</h2>
+          <div class="row"><div><label>消费方</label><input v-model="baselineForm.consumer"/></div><div><label>业务日</label><input v-model="baselineForm.biz_date"/></div></div>
+          <div class="row"><div><label>水位</label><input v-model="baselineForm.watermark"/></div><div><label>备注</label><input v-model="baselineForm.note"/></div></div>
+          <button class="primary" @click="doBaseline">补登入账</button>
+          <div class="err">{{actionErr}}</div>
+        </div>
+      </div>
+
+      <div v-show="tab===4" class="panel block">
+        <h2>衔接目录 · 四份视图同库对账</h2>
+        <div class="muted">库 <span class="mono">{{catalog.db}}</span> · 同库可核 {{catalog.same_db?'是':'否'}} · 全库对账 {{audit.ok?'通过':'有问题'}}</div>
+        <div v-if="audit.problems&&audit.problems.length" style="color:var(--bad);font-size:13px;margin:8px 0">
+          <div v-for="p in audit.problems" :key="p">· {{p}}</div>
+        </div>
+        <table style="margin-top:8px"><thead><tr><th>下游</th><th>业务日</th><th>切片</th><th>衔接检查</th><th>放行</th><th>水位</th><th>一致性</th></tr></thead>
+        <tbody><tr v-for="g in catalog.groups" :key="g.consumer+g.biz_date">
+          <td>{{g.consumer}}</td><td class="mono">{{g.biz_date}}</td>
+          <td class="mono">{{g.slices.map(s=>s.slice_no).join('、')||'—'}}</td>
+          <td class="mono">{{g.checks.map(c=>c.check_no+' '+c.verdict).join('；')||'—'}}</td>
+          <td>{{g.releases.map(r=>r.status).join('、')||'—'}}</td>
+          <td class="mono">{{g.watermarks.map(w=>w.event+' '+w.watermark).join('；')||'—'}}</td>
+          <td><span class="tag" :class="{bad:!g.consistent}">{{g.consistent?'一致':'错位'}}</span>
+            <div class="muted" style="color:var(--bad)" v-for="p in g.problems" :key="p">{{p}}</div></td>
+        </tr></tbody></table>
+      </div>
+
+      <div v-show="tab===5" class="grid">
+        <div class="panel">
+          <h2>衔接检查目录</h2>
+          <table><thead><tr><th>检查号</th><th>下游/日</th><th>判定</th><th>昨日水位</th><th>今日水位</th><th></th></tr></thead>
+          <tbody><tr v-for="h in checks" :key="h.id">
+            <td class="mono">{{h.check_no}}</td><td>{{h.consumer}} / <span class="mono">{{h.biz_date}}</span></td>
+            <td><span class="tag" :class="tagClass(h.verdict)">{{h.verdict}}</span></td>
+            <td class="mono muted">{{h.prev_watermark||'不可核'}}</td>
+            <td class="mono muted">{{h.today_watermark||'—'}}</td>
+            <td><button class="ghost" @click="pickDisposition(h.id)">处置</button></td>
+          </tr></tbody></table>
+        </div>
+        <div class="panel">
+          <h2>处置页</h2>
+          <label>衔接检查 #</label><input type="number" v-model.number="dispositionForm.check_id"/>
+          <label>动作</label>
+          <select v-model="dispositionForm.action"><option v-for="a in dispositionsPage.actions" :value="a">{{a}}</option></select>
+          <label>备注</label><input v-model="dispositionForm.note"/>
+          <button class="primary" @click="doDisposition">记录处置</button>
+          <div class="err">{{actionErr}}</div>
+          <h2 style="margin-top:16px">待处置（非通过）</h2>
+          <table><thead><tr><th>检查号</th><th>判定</th><th>放行</th><th>水位</th><th>已处置</th></tr></thead>
+          <tbody><tr v-for="h in dispositions" :key="'d'+h.id">
+            <td class="mono">{{h.check_no}}</td>
+            <td><span class="tag" :class="tagClass(h.verdict)">{{h.verdict}}</span></td>
+            <td>{{(h.release&&h.release.status)||'—'}}</td>
+            <td class="mono muted">{{(h.watermark&&h.watermark.watermark)||'无'}}</td>
+            <td class="muted">{{(h.dispositions||[]).map(d=>d.action).join('、')||'未处置'}}</td>
+          </tr></tbody></table>
+        </div>
       </div>
     </main>
   </div>`

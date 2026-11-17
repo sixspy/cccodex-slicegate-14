@@ -1,12 +1,12 @@
 
 import pytest
 from fastapi.testclient import TestClient
-from app import app, init_db
+import app as app_module
 
 @pytest.fixture(autouse=True)
 def _db(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.DB_PATH", tmp_path / "t.db")
-    init_db()
+    monkeypatch.setattr(app_module, "DB_PATH", tmp_path / "t.db")
+    app_module.init_db()
     yield
 
 def _login(c):
@@ -15,14 +15,17 @@ def _login(c):
     return {"Authorization": f"Bearer {r.json()['token']}"}
 
 def test_pipeline():
-    c = TestClient(app)
+    c = TestClient(app_module.app)
     assert c.get("/api/health").json()["product"] == "日切放行"
     h = _login(c)
     assert len(c.get("/api/slices", headers=h).json()["items"]) >= 1
     # partial cannot release
     bad = c.post("/api/slices/1/release", headers=h, json={"consumer":"x"})
     assert bad.status_code == 409
-    # register complete and release
+    # 跨日衔接：先补齐昨日现行水位，完整切片才可放行
+    filled = c.post("/api/handoff/baseline", headers=h,
+                    json={"consumer":"ads_x","biz_date":"2026-11-03","watermark":"2026-11-03T09:00:00"})
+    assert filled.status_code == 200
     ok = c.post("/api/slices", headers=h, json={"slice_no":"SL-T-1","biz_date":"2026-11-04","partition_key":"mid","row_count":10,"expected_count":10})
     assert ok.status_code == 200
     sid = ok.json()["id"]
